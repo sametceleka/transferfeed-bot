@@ -139,6 +139,13 @@ def save_state(state: dict) -> None:
 # ----------------------------------------------------------------------------
 # TELEGRAM YARDIMCI FONKSİYONLARI
 # ----------------------------------------------------------------------------
+def _mask(text: str) -> str:
+    """Hata mesajlarında token'ın tam olarak loglara yazılmasını engeller."""
+    if BOT_TOKEN:
+        text = text.replace(BOT_TOKEN, "***MASKED***")
+    return text
+
+
 def send_telegram_message(text: str) -> bool:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
@@ -152,7 +159,7 @@ def send_telegram_message(text: str) -> bool:
         resp.raise_for_status()
         return True
     except requests.RequestException as exc:
-        log.error("Telegram mesajı gönderilemedi: %s", exc)
+        log.error("Telegram mesajı gönderilemedi: %s", _mask(str(exc)))
         return False
 
 
@@ -164,7 +171,7 @@ def get_telegram_updates(offset: int) -> list:
         resp.raise_for_status()
         return resp.json().get("result", [])
     except requests.RequestException as exc:
-        log.error("Telegram güncellemeleri alınamadı: %s", exc)
+        log.error("Telegram güncellemeleri alınamadı: %s", _mask(str(exc)))
         return []
 
 
