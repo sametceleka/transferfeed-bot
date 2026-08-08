@@ -58,28 +58,42 @@ TRANSFER_LINK_RE = re.compile(r"^/transfers/([a-z0-9\-]+)/(\d+)$")
 STORY_LINK_RE = re.compile(r"^/s/([a-z0-9\-]+)/(\d+)$")
 
 # ----------------------------------------------------------------------------
-# KESİN / SÖYLENTİ SINIFLANDIRMA (best-effort, anahtar kelime bazlı)
+# KESİN / SÖYLENTİ SINIFLANDIRMA
+# TransferFeed her transfer detay sayfasının en üstünde kendi etiketini koyuyor
+# (örn. "TRANSFER RUMOUR", "TRANSFER NEWS", "OFFICIAL", "CONFIRMED"). Liste
+# görünümünde bu etiket yok, bu yüzden yeni bir haber geldiğinde detay
+# sayfasına ekstra bir istek atıp sitenin KENDİ etiketini okuyoruz — anahtar
+# kelime tahmini yerine gerçek veri kullanmak çok daha güvenilir.
 # ----------------------------------------------------------------------------
-CONFIRMED_KEYWORDS = [
-    "confirmed", "official", "here we go", "done deal", "completes",
-    "signs for", "signs a", "signed for", "unveiled", "medical done",
-    "join on loan", "joins on loan", "permanent deal", "full package agreed",
-    "announces", "announcement", "completes move",
-]
-RUMOUR_KEYWORDS = [
-    "linked", "interested", "monitoring", "eyeing", "eyes", "targets",
-    "targeting", "rumour", "rumor", "speculation", "enquiry", "approach",
-    "keen on", "considering", "weighing up", "want to sign", "wants to sign",
-    "in talks", "would like", "admirers",
-]
+BADGE_PATTERN = re.compile(
+    r"^(TRANSFER (RUMOUR|NEWS)|OFFICIAL(?: TRANSFER)?|CONFIRMED(?: TRANSFER)?|DONE DEAL)$",
+    re.IGNORECASE,
+)
 
 
-def classify_reliability(text: str) -> str:
-    lowered = text.lower()
-    if any(k in lowered for k in CONFIRMED_KEYWORDS):
+def fetch_detail_badge(url: str) -> str | None:
+    """Transfer detay sayfasını çekip sitenin kendi etiketini (varsa) döndürür."""
+    html = fetch_page(url)
+    if not html:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    for s in soup.stripped_strings:
+        s_clean = s.strip()
+        if BADGE_PATTERN.match(s_clean):
+            return s_clean.upper()
+    return None
+
+
+def classify_from_badge(badge: str | None) -> str:
+    if not badge:
+        return "unknown"
+    b = badge.upper()
+    if "OFFICIAL" in b or "CONFIRMED" in b or "DONE DEAL" in b:
         return "confirmed"
-    if any(k in lowered for k in RUMOUR_KEYWORDS):
+    if "RUMOUR" in b or "RUMOR" in b:
         return "rumour"
+    if "NEWS" in b:
+        return "news"
     return "unknown"
 
 
@@ -273,12 +287,13 @@ def parse_items(html: str, pattern: re.Pattern, prefix: str) -> list[dict]:
     return items
 
 
-def format_message(item: dict, kind: str) -> str:
-    reliability = classify_reliability(item["text"])
+def format_message(item: dict, kind: str, reliability: str) -> str:
     if reliability == "confirmed":
         rel_tag = "🔴 <b>KESİN</b>"
     elif reliability == "rumour":
         rel_tag = "🟡 Söylenti"
+    elif reliability == "news":
+        rel_tag = "🟠 Haber"
     else:
         rel_tag = "⚪️ Belirsiz"
 
@@ -310,8 +325,18 @@ def check_transfers(state: dict) -> dict:
             if item["id"] in seen_ids:
                 continue
             seen_ids.add(item["id"])
-            if send_telegram_message(format_message(item, kind)):
-                log.info("Gönderildi: %s", item["text"])
+
+            # Sadece transfer öğeleri için detay sayfasını okuyup gerçek
+            # etiketi (RUMOUR/NEWS/OFFICIAL) alıyoruz. Story (haber makalesi)
+            # öğeleri zaten kendi başlığında yeterince açık.
+            if kind == "transfer":
+                badge = fetch_detail_badge(item["url"])
+                reliability = classify_from_badge(badge)
+            else:
+                reliability = "news"
+
+            if send_telegram_message(format_message(item, kind, reliability)):
+                log.info("Gönderildi: %s [%s]", item["text"], reliability)
                 new_count += 1
                 time.sleep(1)
 
