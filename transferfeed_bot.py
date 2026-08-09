@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from pathlib import Path
 
 import requests
@@ -56,6 +57,129 @@ log = logging.getLogger("transferfeed_bot")
 
 TRANSFER_LINK_RE = re.compile(r"^/transfers/([a-z0-9\-]+)/(\d+)$")
 STORY_LINK_RE = re.compile(r"^/s/([a-z0-9\-]+)/(\d+)$")
+
+# ----------------------------------------------------------------------------
+# SORARE WATCHLIST: sadece bu liglerdeki kulüplerle ilgili transferler
+# gönderilecek. 2026-27 sezonu güncel (yükselen/düşen takımlar dahil).
+# Bu liste best-effort'tur — eksik/yanlış bir kulüp görürsen kolayca
+# düzenleyebilirsin, sadece string ekleyip çıkarman yeterli.
+# ----------------------------------------------------------------------------
+WATCHLIST_CLUBS = [
+    # --- İngiltere: Premier League (2026-27, 20 kulüp) ---
+    "Arsenal", "Aston Villa", "Bournemouth", "Brentford",
+    "Brighton & Hove Albion", "Chelsea", "Coventry City", "Crystal Palace",
+    "Everton", "Fulham", "Hull City", "Ipswich Town", "Leeds United",
+    "Liverpool", "Manchester City", "Manchester United", "Newcastle United",
+    "Nottingham Forest", "Sunderland", "Tottenham Hotspur",
+    # --- İngiltere: Championship (2026-27, 24 kulüp) ---
+    "Birmingham City", "Blackburn Rovers", "Bolton Wanderers", "Bristol City",
+    "Burnley", "Cardiff City", "Charlton Athletic", "Derby County",
+    "Lincoln City", "Middlesbrough", "Millwall", "Norwich City", "Portsmouth",
+    "Preston North End", "Queens Park Rangers", "Sheffield United",
+    "Southampton", "Stoke City", "Swansea City", "Watford",
+    "West Bromwich Albion", "West Ham United", "Wolverhampton Wanderers",
+    "Wrexham",
+    # --- İspanya: La Liga (2026-27, 20 kulüp) ---
+    "FC Barcelona", "Barcelona", "Real Madrid", "Atlético Madrid",
+    "Athletic Bilbao", "Athletic Club", "Villarreal", "Real Betis",
+    "Celta Vigo", "Rayo Vallecano", "Real Sociedad", "Sevilla", "Getafe",
+    "Osasuna", "Elche", "Espanyol", "Levante", "Alavés", "Valencia",
+    "Racing Santander", "Deportivo La Coruña", "Málaga",
+    # --- Almanya: Bundesliga (2026-27, 18 kulüp) ---
+    "Bayern Munich", "FC Bayern München", "Bayer Leverkusen",
+    "Bayer 04 Leverkusen", "RB Leipzig", "Eintracht Frankfurt",
+    "Borussia Dortmund", "SC Freiburg", "Freiburg", "Mainz 05", "1. FSV Mainz 05",
+    "Werder Bremen", "SV Werder Bremen", "Borussia Mönchengladbach",
+    "VfB Stuttgart", "Union Berlin", "FC Union Berlin", "FC Augsburg",
+    "Augsburg", "TSG Hoffenheim", "Hoffenheim", "FC Köln", "1. FC Köln",
+    "Hamburger SV", "Schalke 04", "FC Schalke 04", "SV Elversberg",
+    "SC Paderborn", "SC Paderborn 07",
+    # --- Almanya: 2. Bundesliga (2026-27, best-effort) ---
+    "Hertha BSC", "Arminia Bielefeld", "VfL Bochum", "Eintracht Braunschweig",
+    "Energie Cottbus", "Darmstadt 98", "Dynamo Dresden", "Greuther Fürth",
+    "SpVgg Greuther Fürth", "Hannover 96", "1. FC Heidenheim", "Heidenheim",
+    "1. FC Kaiserslautern", "Kaiserslautern", "FC St. Pauli", "St. Pauli",
+    "VfL Wolfsburg", "Wolfsburg", "VfL Osnabrück", "1. FC Nürnberg",
+    "Nürnberg", "Karlsruher SC", "Hansa Rostock", "1. FC Magdeburg",
+    # --- Fransa: Ligue 1 (2026-27, 18 kulüp) ---
+    "Paris Saint Germain", "Paris Saint-Germain", "Marseille",
+    "Olympique Marseille", "Monaco", "AS Monaco", "LOSC Lille", "Lille",
+    "RC Lens", "Lens", "Lyon", "Olympique Lyonnais", "Rennes", "Stade Rennais",
+    "Strasbourg", "Nice", "Toulouse", "Angers", "Auxerre", "Brest",
+    "Le Havre", "Lorient", "Paris FC", "Troyes", "Le Mans",
+    # --- Fransa: Ligue 2 (2026-27, best-effort) ---
+    "Metz", "FC Metz", "Nantes", "FC Nantes", "Guingamp", "Red Star",
+    "Annecy", "Nancy", "Dunkerque", "Boulogne", "Pau FC", "Rodez",
+    "Laval", "Clermont", "Clermont Foot", "Saint-Étienne", "AS Saint-Étienne",
+    "Montpellier", "Reims", "Stade de Reims", "Grenoble", "Caen",
+    "Ajaccio", "AC Ajaccio", "Quevilly-Rouen",
+    # --- Hollanda: Eredivisie (2026-27, 18 kulüp) ---
+    "Ajax", "PSV", "PSV Eindhoven", "Feyenoord", "AZ", "AZ Alkmaar",
+    "FC Twente", "FC Utrecht", "Go Ahead Eagles", "Sparta Rotterdam",
+    "NEC", "NEC Nijmegen", "Fortuna Sittard", "SC Heerenveen", "Heerenveen",
+    "PEC Zwolle", "FC Groningen", "Groningen", "Willem II", "RKC Waalwijk",
+    "Excelsior", "ADO Den Haag", "Cambuur", "SC Cambuur",
+    # --- Belçika: Pro League (2026-27, best-effort) ---
+    "Club Brugge", "Union Saint-Gilloise", "Union SG", "Anderlecht",
+    "Genk", "KRC Genk", "Standard Liège", "Standard de Liège", "Gent",
+    "KAA Gent", "Royal Antwerp", "Antwerp", "Cercle Brugge", "OH Leuven",
+    "Sint-Truiden", "STVV", "Westerlo", "Charleroi", "La Louvière",
+    "Zulte Waregem", "Beveren", "Kortrijk", "Lommel",
+    # --- Portekiz: Liga Portugal (2026-27, 18 kulüp) ---
+    "Benfica", "Porto", "FC Porto", "Sporting CP", "Sporting Lisbon",
+    "Braga", "SC Braga", "Vitória Guimarães", "Famalicão", "Moreirense",
+    "Casa Pia", "Estoril", "Arouca", "Nacional", "Rio Ave", "Gil Vicente",
+    "AVS", "Santa Clara", "Estrela Amadora", "Marítimo", "Académico de Viseu",
+    # --- Japonya: J1 League (2026-27, best-effort) ---
+    "Kashima Antlers", "Urawa Red Diamonds", "Urawa Reds",
+    "Kawasaki Frontale", "Yokohama F. Marinos", "FC Tokyo", "Tokyo Verdy",
+    "Kashiwa Reysol", "Machida Zelvia", "Sanfrecce Hiroshima", "Vissel Kobe",
+    "Gamba Osaka", "Cerezo Osaka", "Avispa Fukuoka", "Nagoya Grampus",
+    "Fagiano Okayama", "Shimizu S-Pulse", "Kyoto Sanga", "JEF United Chiba",
+    "V-Varen Nagasaki", "Tochigi City",
+    # --- ABD/Kanada: MLS (2026, 30 kulüp) ---
+    "Atlanta United", "Austin FC", "CF Montréal", "Charlotte FC",
+    "Chicago Fire", "FC Cincinnati", "Colorado Rapids", "Columbus Crew",
+    "DC United", "D.C. United", "FC Dallas", "Houston Dynamo", "Inter Miami",
+    "LA Galaxy", "Los Angeles FC", "LAFC", "Minnesota United", "Nashville SC",
+    "New England Revolution", "New York City FC", "NYCFC",
+    "New York Red Bulls", "Orlando City", "Philadelphia Union",
+    "Portland Timbers", "Real Salt Lake", "San Diego FC",
+    "San Jose Earthquakes", "Seattle Sounders", "Sporting Kansas City",
+    "St. Louis City", "Toronto FC", "Vancouver Whitecaps",
+    # --- Avusturya: Bundesliga (2026-27, 12 kulüp) ---
+    "Sturm Graz", "SK Sturm Graz", "Red Bull Salzburg", "Salzburg",
+    "Rapid Wien", "SK Rapid Wien", "LASK", "Austria Wien", "FK Austria Wien",
+    "GAK", "Grazer AK", "Wolfsberger AC", "Wolfsberg", "TSV Hartberg",
+    "Hartberg", "SCR Altach", "Altach", "SV Ried", "WSG Tirol",
+    "Austria Lustenau",
+    # --- İskoçya: Premiership (2026-27, 12 kulüp) ---
+    "Aberdeen", "Celtic", "Dundee", "Dundee United", "Falkirk",
+    "Heart of Midlothian", "Hearts", "Hibernian", "Kilmarnock", "Motherwell",
+    "Rangers", "St Johnstone", "St Mirren",
+]
+
+
+def normalize_club(name: str) -> str:
+    """Kulüp adını karşılaştırma için sadeleştirir: aksanları kaldırır,
+    küçük harfe çevirir, alfanümerik olmayan karakterleri siler."""
+    if not name:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", name)
+    ascii_str = nfkd.encode("ascii", "ignore").decode("ascii")
+    ascii_str = ascii_str.lower()
+    return re.sub(r"[^a-z0-9]", "", ascii_str)
+
+
+WATCHLIST_NORMALIZED = {normalize_club(c) for c in WATCHLIST_CLUBS}
+
+
+def is_watchlist_relevant(source_club: str, target_club: str) -> bool:
+    return (
+        normalize_club(source_club) in WATCHLIST_NORMALIZED
+        or normalize_club(target_club) in WATCHLIST_NORMALIZED
+    )
+
 
 # ----------------------------------------------------------------------------
 # KESİN / SÖYLENTİ SINIFLANDIRMA
@@ -210,7 +334,8 @@ def handle_commands(state: dict) -> dict:
             durum = "aktif ✅" if state["running"] else "durduruldu ⏸"
             send_telegram_message(
                 f"Durum: {durum}\nBilinen haber sayısı: {len(state['seen_ids'])}\n"
-                f"Kontrol aralığı: {CHECK_INTERVAL_SECONDS}s"
+                f"Kontrol aralığı: {CHECK_INTERVAL_SECONDS}s\n"
+                f"İzlenen kulüp sayısı: {len(WATCHLIST_CLUBS)}"
             )
     return state
 
@@ -326,10 +451,13 @@ def check_transfers(state: dict) -> dict:
                 continue
             seen_ids.add(item["id"])
 
-            # Sadece transfer öğeleri için detay sayfasını okuyup gerçek
-            # etiketi (RUMOUR/NEWS/OFFICIAL) alıyoruz. Story (haber makalesi)
-            # öğeleri zaten kendi başlığında yeterince açık.
+            # Sadece izlenen liglerdeki kulüplerle ilgili transferleri
+            # gönder (transfer öğeleri için). Story (haber makalesi)
+            # öğeleri filtrelenmiyor, zaten sayıca az ve editoryel içerik.
             if kind == "transfer":
+                if not is_watchlist_relevant(item["source_club"], item["target_club"]):
+                    continue  # watchlist dışı, atla
+
                 badge = fetch_detail_badge(item["url"])
                 reliability = classify_from_badge(badge)
             else:
